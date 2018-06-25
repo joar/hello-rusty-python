@@ -1,0 +1,15 @@
+[package]
+name = "intrange"
+version = "0.1.0"
+authors = ["Joar Wandborg <joar@wandborg.se>"]
+
+[dependencies]
+
+[dependencies.pyo3]
+version = "0.2"
+features = ["extension-module"]
+
+[lib]
+name = "intrange"
+crate-type = ["cdylib"]
+
