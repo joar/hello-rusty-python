@@ -3,87 +3,95 @@
 extern crate csv;
 extern crate pyo3;
 
+use pyo3::exc;
 use pyo3::prelude::*;
 use pyo3::py::class as pyclass;
 use pyo3::py::methods as pymethods;
 use pyo3::py::modinit as pymodinit;
 use pyo3::py::proto as pyproto;
-use std::fs::File;
-use std::io;
 
+
+type RecordsIter = Iterator<Item=csv::Result<csv::StringRecord>>;
 
 #[pyclass]
-struct FastCSVReader<'r> {
+struct CSVReader {
     token: PyToken,
-    iter: Box<Iterator<Item=csv::StringRecord> + 'r>,
-//    iter: &'r csv::StringRecordsIter<'r, io::Read>,
+    iter: Box<RecordsIter>,
 }
 
 
 fn records_iterator(
-    path: String
-) -> Result<Box<Iterator<Item=csv::StringRecord>>, Box<csv::Error>> {
-    let mut rdr = csv::ReaderBuilder::new()
+    path: String,
+) -> csv::Result<Box<RecordsIter>> {
+    let rdr = csv::ReaderBuilder::new()
         .delimiter(b'\x01')
         .comment(Some(b'#'))
         .flexible(true)
         .has_headers(false)
-        .terminator(csv::Terminator::Any(b'\n'))
+        .terminator(csv::Terminator::Any(b'\x02'))
         .from_path(path)?;
 
-    let iter = rdr.into_records().into();
-    return Ok(Box::new(iter));
+    let iter: Box<RecordsIter> = Box::new(rdr.into_records());
+    return Ok(iter);
 }
 
-
 #[pymethods]
-impl<'r> FastCSVReader<'r> {
+impl CSVReader {
     #[new]
     fn __new__(
         obj: &PyRawObject,
         path: String,
     ) -> PyResult<()> {
-//        let buf = match File::open(path) {
-//            Ok(buf) => buf,
-//            Err(err) => {
-//                return Err(PyErr::from(err.into()))
-//            }
-//        };
-        let iter = match records_iterator(path) {
+        let iter = match records_iterator(
+            path,
+        ) {
             Ok(rdr) => rdr,
             Err(err) => {
-                return Err(PyErr::new(""));
+                return Err(PyErr::new::<exc::IOError, _>(
+                    format!("Could not parse CSV: {:?}", err)
+                ));
             }
         };
 
-        let mut iter: csv::StringRecordsIter<File> = rdr.records();
         obj.init(|token| {
-            FastCSVReader {
+            CSVReader {
                 token,
-                iter: &iter,
+                iter,
             }
         })
     }
 }
 
+fn record_to_list(py: Python, record: csv::StringRecord) -> PyResult<PyObject> {
+    let list = PyList::new::<&str>(py, &[]);
+    for field in record.iter() {
+        list.append(field)?;
+    }
+    return Ok(list.into());
+}
 
-//#[pyproto]
-impl<'r> PyIterProtocol<'r> for FastCSVReader<'r> {
+#[pyproto]
+impl PyIterProtocol for CSVReader {
     fn __iter__(&mut self) -> PyResult<PyObject> {
         Ok(self.into())
     }
 
     fn __next__(&mut self) -> PyResult<Option<PyObject>> {
         match self.iter.next() {
-            Ok(record) => {
-                println!("{:?}", record);
-                let mut output: Vec<String> = Vec::new();
-                output.try_reserve(record.len());
-                output.extend(record.iter());
-                return Ok(Some(output.into()));
-            }
-            Err(err) => {
-                println!("error reading CSV from <stdin>: {}", err);
+            Some(res) => match res {
+                Ok(record) => {
+                    let gil = Python::acquire_gil();
+                    let py = gil.python();
+                    let output = record_to_list(py, record)?;
+                    return Ok(Some(output));
+                }
+                Err(err) => {
+                    return Err(PyErr::new::<exc::IOError, _>(
+                        format!("Could not read record {:?}", err)
+                    ));
+                }
+            },
+            None => {
                 return Ok(None);
             }
         }
@@ -92,10 +100,10 @@ impl<'r> PyIterProtocol<'r> for FastCSVReader<'r> {
 
 
 // Add bindings to the generated python module
-// N.B: names: "libfastcsv2" must be the name of the `.so` or `.pyd` file
+// N.B: names: "libfastcsv" must be the name of the `.so` or `.pyd` file
 /// This module is implemented in Rust.
-#[pymodinit(libfastcsv2)]
-fn init_mod(py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<FastCSVReader>()?;
+#[pymodinit(libfastcsv)]
+fn init_mod(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<CSVReader>()?;
     Ok(())
 }
